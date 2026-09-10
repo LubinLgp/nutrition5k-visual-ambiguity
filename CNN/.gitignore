@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+depth/
+checkpoints/*.pt
+checkpoints/pretrained/
+logs_generate/
+logs_train_fusion/
+logs_eval/

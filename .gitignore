@@ -1,0 +1,42 @@
+# ----- Environnement Python (venv vendu, ~1.2 Go, à régénérer via env/setup_env.sh) -----
+env_Fusion_Midas_Flava/
+env_stage/
+
+# ----- Dataset (Nutrition5k, ~3 Go, non versionné) -----
+data/
+
+# ----- Caches de profondeur MiDaS pré-calculée (~3.7 Go/variante) -----
+depth/
+**/depth/
+
+# ----- Poids / checkpoints (MiDaS pretrained + torch_hub + checkpoints d'entraînement) -----
+checkpoints/
+**/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# ----- Sorties d'exécution -----
+logs_*/
+**/logs_*/
+*.out
+*.err
+*.zip
+
+# ----- Résultats volumineux régénérables (garder resultats/*.csv si souhaité : commenter) -----
+# resultats/            # décommenter pour NE PAS versionner les CSV de résultats
+
+# ----- Caches Python -----
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.ipynb_checkpoints/
+
+# ----- Divers OS / éditeurs -----
+.DS_Store
+.vscode/
+.idea/
+
+# ----- Doublon obsolète -----
+eval copie.py
