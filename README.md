@@ -130,6 +130,9 @@ Tous dans `CNN/scripts/` ; ils écrivent des CSV par plat réutilisables.
 | `scripts/baseline_seeds.sh` | P1 et P1b sur **5 seeds** (barres d'erreur) | `prior_*_s{0..4}.csv` |
 | `scripts/visual_seeds.sh` | le **modèle visuel** gt/none/direct sur 5 seeds | `resultats/fusion_gt_all_best_s{0..4}.csv` |
 | `scripts/density_seeds.sh` | le **modèle densité** gt/none sur 5 seeds (décomposition compo/portion) | `resultats/fusion_gt_all_d_best_s{0..4}.csv` |
+| `scripts/rgbonly_seeds.sh` | **ablation RGB-only** (`--no-depth`, profondeur permutée dans le batch) × 5 seeds — la profondeur aide-t-elle le glucide ? | `logs_rgbonly_seeds/*.out` (`test_carb_PMAE`) |
+| `scripts/carbonly_seeds.sh` | **ablation mono-tâche** (`--carb-only`, L1 glucide seul) × 5 seeds — dilution multi-tâche ? | `logs_carbonly_seeds/*.out` (`test_carb_PMAE`) |
+| `scripts/datacurve.sh` | **courbe d'apprentissage** (`--train-frac` 0.25/0.5 × 3 seeds) — plus de données aideraient-elles ? | `logs_datacurve/*.out` (`test_carb_PMAE`) |
 
 Exemples :
 ```bash

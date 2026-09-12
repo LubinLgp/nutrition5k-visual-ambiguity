@@ -1,0 +1,7 @@
+ablation,depth_source,train_frac,seed,test_carb_pmae
+datacurve,gt,0.25,0,26.86
+datacurve,gt,0.25,1,28.80
+datacurve,gt,0.25,2,26.95
+datacurve,gt,0.50,0,23.22
+datacurve,gt,0.50,1,23.72
+datacurve,gt,0.50,2,23.24

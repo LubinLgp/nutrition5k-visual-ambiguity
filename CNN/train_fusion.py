@@ -48,6 +48,22 @@ from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.metrics import compute_mae_pmae
 
 
+class CarbOnlyLoss(torch.nn.Module):
+    """Perte mono-tâche : L1 sur le SEUL glucide, indexé par sa vraie colonne
+    (NUTRIENT_NAMES.index('carb')). NB : on ne peut PAS réutiliser
+    GeometricMultiTaskLoss(('carb',)) car l1_per_task indexe par position (0),
+    ce qui superviserait les calories au lieu du glucide."""
+
+    def __init__(self):
+        super().__init__()
+        from config import NUTRIENT_NAMES as _NN
+        self.idx = _NN.index("carb")
+
+    def forward(self, pred, target):
+        l = torch.mean(torch.abs(pred[:, self.idx] - target[:, self.idx]))
+        return l, {"carb": l}
+
+
 def default_device():
     if torch.cuda.is_available():
         return "cuda"
@@ -59,7 +75,8 @@ def default_device():
 def train_one_epoch(fusion, loader, optimizer, criterion, device, density=False,
                     flava=None, cache=None,
                     lam_txt=FLAVA_ALIGN_LAMBDA, lam_vis=FLAVA_VIS_LAMBDA,
-                    tau=FLAVA_ALIGN_TEMPERATURE, n_neg=FLAVA_ALIGN_NEG):
+                    tau=FLAVA_ALIGN_TEMPERATURE, n_neg=FLAVA_ALIGN_NEG,
+                    no_depth=False):
     fusion.train()
     use_txt = flava is not None and flava.use_text
     use_vis = flava is not None and flava.use_image
@@ -69,6 +86,8 @@ def train_one_epoch(fusion, loader, optimizer, criterion, device, density=False,
     for batch in tqdm(loader, desc="train", leave=False):
         rgb = batch["rgb"].to(device)
         depth = batch["depth"].to(device)
+        if no_depth:  # ablation RGB-only : profondeur permutée dans le batch
+            depth = torch.roll(depth, shifts=1, dims=0)  # casse la corresp. RGB↔profondeur
         targets = batch["targets"].to(device)
         with torch.cuda.amp.autocast(enabled=use_amp):
             # mode densité : le forward renvoie (masse, densités) ; sinon les totaux.
@@ -107,7 +126,7 @@ def train_one_epoch(fusion, loader, optimizer, criterion, device, density=False,
 
 
 @torch.no_grad()
-def evaluate(fusion, loader, total_criterion, device, density=False):
+def evaluate(fusion, loader, total_criterion, device, density=False, no_depth=False):
     """Éval (val) sur les TOTAUX. En mode densité on reconstruit le total avec la
     masse PRÉDITE (objectif bout-en-bout, pour la sélection du meilleur epoch)."""
     fusion.eval()
@@ -116,6 +135,8 @@ def evaluate(fusion, loader, total_criterion, device, density=False):
     for batch in loader:
         rgb = batch["rgb"].to(device)
         depth = batch["depth"].to(device)
+        if no_depth:  # ablation RGB-only : profondeur permutée dans le batch
+            depth = torch.roll(depth, shifts=1, dims=0)  # casse la corresp. RGB↔profondeur
         targets = batch["targets"].to(device)
         if density:
             mass, dens = fusion(rgb, depth)
@@ -159,9 +180,31 @@ def main():
                         help="graine aléatoire (reproductibilité + runs multi-graines). "
                              "Si fournie, le checkpoint reçoit un suffixe _s<seed> pour "
                              "ne pas écraser les autres graines.")
+    parser.add_argument("--no-depth", action="store_true",
+                        help="ablation RGB-only : la profondeur est PERMUTÉE dans le "
+                             "batch (roll de 1), ce qui casse la correspondance "
+                             "RGB↔profondeur — la profondeur ne porte plus aucune info "
+                             "alignée sur le plat, mais garde des statistiques réelles "
+                             "(pas de NaN, contrairement à une entrée nulle). Mesure la "
+                             "contribution informationnelle de la profondeur. "
+                             "Suffixe checkpoint _rgbonly.")
+    parser.add_argument("--carb-only", action="store_true",
+                        help="ablation mono-tâche : perte L1 sur le SEUL glucide "
+                             "(sélection de l'époque sur le PMAE glucide). Teste la "
+                             "dilution multi-tâche. Incompatible avec --density. "
+                             "Suffixe checkpoint _carbonly.")
+    parser.add_argument("--train-frac", type=float, default=1.0,
+                        help="fraction du train utilisée (courbe d'apprentissage / "
+                             "taille de données). Sous-échantillonnage aléatoire "
+                             "reproductible (via --seed). Suffixe checkpoint _f<frac>.")
     args = parser.parse_args()
     need_flava = args.flava_txt or args.flava_vis
     apply_skip = not args.no_skip
+    if args.carb_only and args.density:
+        raise ValueError("--carb-only et --density sont incompatibles (la tête densité "
+                         "reconstruit les totaux à partir de masse+densités des 4 nutriments)")
+    if not (0.0 < args.train_frac <= 1.0):
+        raise ValueError("--train-frac doit être dans ]0, 1]")
 
     if args.seed is not None:
         import random
@@ -178,6 +221,11 @@ def main():
         apply_skip=apply_skip,
     )
     train_ids, val_ids = split_train_val(all_train_ids, val_ratio=args.val_ratio)
+    if args.train_frac < 1.0:  # courbe d'apprentissage : sous-échantillonne le train (val/test intacts)
+        rng = np.random.RandomState(args.seed if args.seed is not None else 0)
+        n_keep = max(1, int(round(len(train_ids) * args.train_frac)))
+        keep = rng.choice(len(train_ids), size=n_keep, replace=False)
+        train_ids = [train_ids[i] for i in sorted(keep)]
     test_ids = filter_valid_dish_ids(
         load_split_ids(DEPTH_TEST_SPLIT), labels=labels, depth_source=args.depth_source,
         apply_skip=apply_skip,
@@ -252,34 +300,52 @@ def main():
     # criterion = perte d'entraînement (densité ou directe) ; total_criterion = perte
     # géométrique sur les 5 totaux, utilisée par l'éval (val) quel que soit le mode.
     total_criterion = GeometricMultiTaskLoss()
-    criterion = DensityLoss() if args.density else total_criterion
+    if args.density:
+        criterion = DensityLoss()
+    elif args.carb_only:
+        criterion = CarbOnlyLoss()  # L1 mono-tâche sur la vraie colonne glucide
+    else:
+        criterion = total_criterion
     params = list(fusion.parameters())
     if flava is not None:
         params += flava.trainable_parameters()
     optimizer = torch.optim.Adam(params, lr=args.lr)
     ckpt_path = fusion_ckpt_path(args.depth_source, args.flava_txt, args.flava_vis,
                                  args.no_skip, args.density)
+    # suffixes d'ablation : ne pas écraser les runs de référence
+    if args.no_depth:
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_rgbonly{ckpt_path.suffix}")
+    if args.carb_only:
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_carbonly{ckpt_path.suffix}")
+    if args.train_frac < 1.0:
+        frac_tag = f"{args.train_frac:.2f}".rstrip("0").rstrip(".").replace(".", "p")
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_f{frac_tag}{ckpt_path.suffix}")
     if args.seed is not None:  # suffixe par graine : ne pas écraser les autres runs
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_s{args.seed}{ckpt_path.suffix}")
     best_pmae = float("inf")
     best_epoch = 0
 
+    # carb-only : sélectionner l'époque sur le PMAE glucide (les autres têtes ne sont pas supervisées)
+    sel_key = (lambda m: m["carb"]["pmae"]) if args.carb_only else (lambda m: m["mean_pmae"])
     for epoch in range(1, args.epochs + 1):
         tr = train_one_epoch(
             fusion, train_loader, optimizer, criterion, device,
             density=args.density, flava=flava, cache=cache,
             lam_txt=args.align_lambda, lam_vis=args.vis_lambda,
             tau=args.align_temperature, n_neg=args.align_neg,
+            no_depth=args.no_depth,
         )
-        va_loss, va_metrics = evaluate(fusion, val_loader, total_criterion, device, density=args.density)
+        va_loss, va_metrics = evaluate(fusion, val_loader, total_criterion, device,
+                                       density=args.density, no_depth=args.no_depth)
         for p in optimizer.param_groups:
             p["lr"] *= args.lr_decay
         print(
             f"Epoch {epoch}/{args.epochs}  loss={tr:.4f}  val_loss={va_loss:.4f}  "
-            f"val_PMAE={va_metrics['mean_pmae']:.2f}%  lr={optimizer.param_groups[0]['lr']:.2e}"
+            f"val_PMAE={va_metrics['mean_pmae']:.2f}%  val_carb={va_metrics['carb']['pmae']:.2f}%  "
+            f"lr={optimizer.param_groups[0]['lr']:.2e}"
         )
-        if va_metrics["mean_pmae"] < best_pmae:
-            best_pmae = va_metrics["mean_pmae"]
+        if sel_key(va_metrics) < best_pmae:
+            best_pmae = sel_key(va_metrics)
             best_epoch = epoch
             state = {
                 "model": fusion.state_dict(),
@@ -297,10 +363,12 @@ def main():
 
     best = load_checkpoint(ckpt_path)
     fusion.load_state_dict(best["model"])
-    _, test_metrics = evaluate(fusion, test_loader, total_criterion, device, density=args.density)
+    _, test_metrics = evaluate(fusion, test_loader, total_criterion, device,
+                               density=args.density, no_depth=args.no_depth)
     print(
         f"checkpoint {ckpt_path} | best epoch {best_epoch} "
-        f"| val_PMAE={best_pmae:.2f}% | test_PMAE={test_metrics['mean_pmae']:.2f}%"
+        f"| val_sel={best_pmae:.2f}% | test_PMAE={test_metrics['mean_pmae']:.2f}% "
+        f"| test_carb_PMAE={test_metrics['carb']['pmae']:.2f}%"
     )
 
 
