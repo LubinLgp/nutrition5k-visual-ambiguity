@@ -208,6 +208,9 @@ def main():
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--val-ratio", type=float, default=FUSION_VAL_RATIO)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--train-frac", type=float, default=1.0,
+                   help="fraction du train utilisée (courbe d'apprentissage). Sous-échantillonnage "
+                        "aléatoire reproductible (via --seed) ; val et test intacts.")
     p.add_argument("--device", default="cpu")
     p.add_argument("--csv-out", type=Path, default=None)
     args = p.parse_args()
@@ -226,6 +229,10 @@ def main():
     all_train = filter_valid_dish_ids(load_split_ids(DEPTH_TRAIN_SPLIT), labels=labels,
                                       depth_source=args.depth_source, apply_skip=apply_skip)
     train_ids, val_ids = split_train_val(all_train, val_ratio=args.val_ratio)
+    if args.train_frac < 1.0:  # courbe d'apprentissage : sous-échantillonne le train (val/test intacts)
+        rng = np.random.RandomState(args.seed)
+        n_keep = max(1, int(round(len(train_ids) * args.train_frac)))
+        train_ids = [train_ids[i] for i in sorted(rng.choice(len(train_ids), n_keep, replace=False))]
     test_ids = filter_valid_dish_ids(load_split_ids(DEPTH_TEST_SPLIT), labels=labels,
                                      depth_source=args.depth_source, apply_skip=apply_skip)
 
