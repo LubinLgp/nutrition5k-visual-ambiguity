@@ -133,6 +133,9 @@ Tous dans `CNN/scripts/` ; ils écrivent des CSV par plat réutilisables.
 | `scripts/rgbonly_seeds.sh` | **ablation RGB-only** (`--no-depth`, profondeur permutée dans le batch) × 5 seeds — la profondeur aide-t-elle le glucide ? | `logs_rgbonly_seeds/*.out` (`test_carb_PMAE`) |
 | `scripts/carbonly_seeds.sh` | **ablation mono-tâche** (`--carb-only`, L1 glucide seul) × 5 seeds — dilution multi-tâche ? | `logs_carbonly_seeds/*.out` (`test_carb_PMAE`) |
 | `scripts/datacurve.sh` | **courbe d'apprentissage** (`--train-frac` 0.25/0.5 × 3 seeds) — plus de données aideraient-elles ? | `logs_datacurve/*.out` (`test_carb_PMAE`) |
+| `scripts/rgbsingle_seeds.sh` | **vrai RGB-only mono-branche** (`--rgb-only`, aucune branche profondeur) × 5 seeds | `logs_rgbsingle_seeds/*.out` |
+| `scripts/lambda_sweep.sh` | **sweep λ FLAVA-texte** (`--align-lambda` 1/3/10 × 3 seeds) — un meilleur λ aiderait-il ? | `logs_lambda_sweep/*.out` |
+| `scripts/carbonly_lr_sweep.sh` | **carb-only sweep LR** (5e-5/2e-5/1e-5 × 3 seeds) — test de dilution équitable | `logs_carbonly_lr/*.out` |
 
 Exemples :
 ```bash

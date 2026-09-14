@@ -57,13 +57,15 @@ class RGBDFusionNet(nn.Module):
     """
 
     def __init__(self, pretrained: bool = True, proj_dim: int = FLAVA_PROJ_DIM,
-                 density: bool = False):
+                 density: bool = False, rgb_only: bool = False):
         super().__init__()
         self.density = density
+        self.rgb_only = rgb_only  # mono-branche : aucune profondeur (ni backbone ni CAB)
         self.rgb_backbone = ResNet101MultiScale(3, pretrained=pretrained)
-        self.depth_backbone = ResNet101MultiScale(1, pretrained=pretrained)
         ch = self.rgb_backbone.out_channels
-        self.cabs = nn.ModuleList([CrossModalAttentionBlock(c) for c in ch])
+        if not rgb_only:
+            self.depth_backbone = ResNet101MultiScale(1, pretrained=pretrained)
+            self.cabs = nn.ModuleList([CrossModalAttentionBlock(c) for c in ch])
         self.ms_fusion = MultiScaleFusion(ch)
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(ch[-1], 2048)
@@ -81,15 +83,18 @@ class RGBDFusionNet(nn.Module):
             nn.Linear(2048, proj_dim),
         )
 
-    def encode_visual(self, rgb: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
+    def encode_visual(self, rgb: torch.Tensor, depth: torch.Tensor = None) -> torch.Tensor:
         rgb_feats = self.rgb_backbone(rgb)
-        depth_feats = self.depth_backbone(depth)
-        cross = [cab(r, d) for cab, r, d in zip(self.cabs, rgb_feats, depth_feats)]
+        if self.rgb_only:  # mono-branche : on nourrit directement les features RGB (mêmes canaux que les CAB)
+            cross = rgb_feats
+        else:
+            depth_feats = self.depth_backbone(depth)
+            cross = [cab(r, d) for cab, r, d in zip(self.cabs, rgb_feats, depth_feats)]
         f4 = self.ms_fusion(cross)
         x = self.gap(f4).flatten(1)
         return self.fc(x)
 
-    def forward(self, rgb: torch.Tensor, depth: torch.Tensor, return_embedding: bool = False):
+    def forward(self, rgb: torch.Tensor, depth: torch.Tensor = None, return_embedding: bool = False):
         h = self.encode_visual(rgb, depth)
         feat = torch.relu(h)
         if self.density:

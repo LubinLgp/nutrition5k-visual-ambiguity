@@ -188,11 +188,20 @@ def main():
                              "(pas de NaN, contrairement à une entrée nulle). Mesure la "
                              "contribution informationnelle de la profondeur. "
                              "Suffixe checkpoint _rgbonly.")
+    parser.add_argument("--rgb-only", action="store_true",
+                        help="ablation RGB-only VRAIE (mono-branche) : aucune branche "
+                             "profondeur, aucune CAB — les features RGB alimentent "
+                             "directement la fusion multi-échelle. Contrairement à "
+                             "--no-depth (profondeur permutée), il n'y a plus de profondeur "
+                             "du tout. Suffixe checkpoint _rgbsingle.")
     parser.add_argument("--carb-only", action="store_true",
                         help="ablation mono-tâche : perte L1 sur le SEUL glucide "
                              "(sélection de l'époque sur le PMAE glucide). Teste la "
                              "dilution multi-tâche. Incompatible avec --density. "
                              "Suffixe checkpoint _carbonly.")
+    parser.add_argument("--tag", default=None,
+                        help="suffixe libre ajouté au nom du checkpoint (ex. sweeps λ/LR) "
+                             "pour éviter les collisions entre configurations.")
     parser.add_argument("--train-frac", type=float, default=1.0,
                         help="fraction du train utilisée (courbe d'apprentissage / "
                              "taille de données). Sous-échantillonnage aléatoire "
@@ -203,6 +212,9 @@ def main():
     if args.carb_only and args.density:
         raise ValueError("--carb-only et --density sont incompatibles (la tête densité "
                          "reconstruit les totaux à partir de masse+densités des 4 nutriments)")
+    if args.rgb_only and args.no_depth:
+        raise ValueError("--rgb-only (mono-branche) et --no-depth (profondeur permutée) "
+                         "sont deux ablations distinctes, à ne pas combiner")
     if not (0.0 < args.train_frac <= 1.0):
         raise ValueError("--train-frac doit être dans ]0, 1]")
 
@@ -258,7 +270,8 @@ def main():
         test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
-    fusion = RGBDFusionNet(pretrained=True, proj_dim=FLAVA_PROJ_DIM, density=args.density).to(device)
+    fusion = RGBDFusionNet(pretrained=True, proj_dim=FLAVA_PROJ_DIM, density=args.density,
+                           rgb_only=args.rgb_only).to(device)
     if args.pretrained:
         if not args.density:
             raise ValueError("--pretrained nécessite --density (mêmes têtes)")
@@ -313,6 +326,8 @@ def main():
     ckpt_path = fusion_ckpt_path(args.depth_source, args.flava_txt, args.flava_vis,
                                  args.no_skip, args.density)
     # suffixes d'ablation : ne pas écraser les runs de référence
+    if args.rgb_only:
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_rgbsingle{ckpt_path.suffix}")
     if args.no_depth:
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_rgbonly{ckpt_path.suffix}")
     if args.carb_only:
@@ -320,6 +335,8 @@ def main():
     if args.train_frac < 1.0:
         frac_tag = f"{args.train_frac:.2f}".rstrip("0").rstrip(".").replace(".", "p")
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_f{frac_tag}{ckpt_path.suffix}")
+    if args.tag:
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_{args.tag}{ckpt_path.suffix}")
     if args.seed is not None:  # suffixe par graine : ne pas écraser les autres runs
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_s{args.seed}{ckpt_path.suffix}")
     best_pmae = float("inf")
