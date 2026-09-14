@@ -194,6 +194,9 @@ def main():
                    help="défaut: mean->mean, presence->mlp, mass->linear")
     p.add_argument("--add-true-mass", action="store_true",
                    help="ajoute la masse totale vraie en feature (variante oracle-portion)")
+    p.add_argument("--loss", choices=["geo", "mse"], default="geo",
+                   help="perte du passthrough : geo=moyenne géométrique L1 (défaut, médiane "
+                        "conditionnelle) ; mse=L2 (moyenne conditionnelle) — test biais L1 vs L2.")
     p.add_argument("--passthrough", action="store_true",
                    help="P1b PASSTHROUGH : prédit les DENSITÉS /100g depuis l'identité "
                         "(presence) puis reconstruit le total = densité × masse totale "
@@ -264,7 +267,10 @@ def main():
         tr_loader = DataLoader(TensorDataset(torch.from_numpy(Xtr), Dtr),
                                batch_size=args.batch_size, shuffle=True)
         model = MLPHead(len(vocab), out_dim=len(DENSITY_NUTRIENTS)).to(device)
-        criterion = GeometricMultiTaskLoss(DENSITY_NUTRIENTS)  # L1 géométrique sur les densités
+        if args.loss == "mse":  # L2 : moyenne conditionnelle (test biais signé L1 vs L2)
+            criterion = lambda pr, tg: (((pr - tg) ** 2).mean(), {})
+        else:
+            criterion = GeometricMultiTaskLoss(DENSITY_NUTRIENTS)  # L1 géométrique sur les densités
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         mass_va = torch.from_numpy(Yva[:, _MASS_IDX:_MASS_IDX + 1])
         best_val, best_state, best_epoch = float("inf"), None, 0
