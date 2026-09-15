@@ -136,6 +136,7 @@ Tous dans `CNN/scripts/` ; ils écrivent des CSV par plat réutilisables.
 | `scripts/rgbsingle_seeds.sh` | **vrai RGB-only mono-branche** (`--rgb-only`, aucune branche profondeur) × 5 seeds | `logs_rgbsingle_seeds/*.out` |
 | `scripts/lambda_sweep.sh` | **sweep λ FLAVA-texte** (`--align-lambda` 1/3/10 × 3 seeds) — un meilleur λ aiderait-il ? | `logs_lambda_sweep/*.out` |
 | `scripts/carbonly_lr_sweep.sh` | **carb-only sweep LR** (5e-5/2e-5/1e-5 × 3 seeds) — test de dilution équitable | `logs_carbonly_lr/*.out` |
+| `scripts/densitycurve.sh` | **courbe densité côté composition** (`--density --train-frac` 0.25/0.5 × 3 seeds) — la composition s'améliore-t-elle avec les données ? (W5) | `logs_densitycurve/*.out` (`carb_comp_PMAE`) |
 | `scripts/auxmass_seeds.sh` | **tête aux masses/ingrédient** (`--aux-ingr-mass`) × 5 seeds — l'image récupère-t-elle la composition si on la supervise dessus ? (W2) | `logs_auxmass_seeds/*.out` |
 
 Exemples :

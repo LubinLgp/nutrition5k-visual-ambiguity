@@ -453,6 +453,20 @@ def main():
         f"| val_sel={best_pmae:.2f}% | test_PMAE={test_metrics['mean_pmae']:.2f}% "
         f"| test_carb_PMAE={test_metrics['carb']['pmae']:.2f}%"
     )
+    if args.density:  # W5 : carb reconstruit avec la masse VRAIE (composition seule, cf. 17.6)
+        _mi = NUTRIENT_NAMES.index("mass")
+        fusion.eval(); preds_tm, gts = [], []
+        with torch.no_grad():
+            for batch in test_loader:
+                rgb = batch["rgb"].to(device); depth = batch["depth"].to(device)
+                if args.no_depth:
+                    depth = torch.roll(depth, shifts=1, dims=0)
+                _, dens = fusion(rgb, depth)
+                true_mass = batch["targets"][:, _mi:_mi + 1].to(device)
+                preds_tm.append(assemble_totals(dens, true_mass).cpu().numpy())
+                gts.append(batch["targets"].numpy())
+        mc = compute_mae_pmae(np.concatenate(preds_tm), np.concatenate(gts))
+        print(f"  [density comp] test_carb_comp_PMAE (densité × masse VRAIE) = {mc['carb']['pmae']:.2f}%")
     if args.aux_ingr_mass:  # test W2 : carb reconstruit depuis les masses PAR INGRÉDIENT prédites
         fusion.eval()
         pred_masses, ci = [], []
