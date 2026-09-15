@@ -48,6 +48,44 @@ from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.metrics import compute_mae_pmae
 
 
+def build_ingr_mass_targets(train_ids, metadata_path):
+    """Cibles de la tête auxiliaire (test W2) : vecteur de masses PAR INGRÉDIENT (g)
+    sur le vocabulaire du train, + densité glucidique par ingrédient (carb/g, constante
+    dans Nutrition5k) pour reconstruire le carb depuis les masses prédites."""
+    per_dish, dsum, dcnt = {}, {}, {}
+    for line in open(metadata_path):
+        f = line.rstrip("\n").split(",")
+        if len(f) < 13 or (len(f) - 6) % 7:
+            continue
+        ings = []
+        for k in range(6, len(f), 7):
+            iid, g, cb = f[k], float(f[k + 2]), float(f[k + 5])
+            if g > 0:
+                ings.append((iid, g))
+                dsum[iid] = dsum.get(iid, 0.0) + cb / g
+                dcnt[iid] = dcnt.get(iid, 0) + 1
+        per_dish[f[0]] = ings
+    vocab = {}
+    for d in train_ids:
+        for iid, _ in per_dish.get(d, []):
+            vocab.setdefault(iid, len(vocab))
+    V = len(vocab)
+    dens_carb = np.zeros(V, np.float32)
+    for iid, j in vocab.items():
+        if dcnt.get(iid):
+            dens_carb[j] = dsum[iid] / dcnt[iid]
+
+    def mass_matrix(ids):
+        M = np.zeros((len(ids), V), np.float32)
+        for r, d in enumerate(ids):
+            for iid, g in per_dish.get(d, []):
+                j = vocab.get(iid)
+                if j is not None:
+                    M[r, j] = g
+        return M
+    return vocab, mass_matrix, dens_carb
+
+
 class CarbOnlyLoss(torch.nn.Module):
     """Perte mono-tâche : L1 sur le SEUL glucide, indexé par sa vraie colonne
     (NUTRIENT_NAMES.index('carb')). NB : on ne peut PAS réutiliser
@@ -76,7 +114,7 @@ def train_one_epoch(fusion, loader, optimizer, criterion, device, density=False,
                     flava=None, cache=None,
                     lam_txt=FLAVA_ALIGN_LAMBDA, lam_vis=FLAVA_VIS_LAMBDA,
                     tau=FLAVA_ALIGN_TEMPERATURE, n_neg=FLAVA_ALIGN_NEG,
-                    no_depth=False):
+                    no_depth=False, aux=False, aux_mat=None, dish2row=None, aux_lambda=1.0):
     fusion.train()
     use_txt = flava is not None and flava.use_text
     use_vis = flava is not None and flava.use_image
@@ -100,6 +138,12 @@ def train_one_epoch(fusion, loader, optimizer, criterion, device, density=False,
             elif use_flava:
                 pred, z_proj = fusion(rgb, depth, return_embedding=True)
                 loss, _ = criterion(pred, targets)
+            elif aux:  # tête auxiliaire masses par ingrédient (test W2)
+                pred, aux_pred = fusion(rgb, depth, return_aux=True)
+                loss, _ = criterion(pred, targets)
+                rows = [dish2row[d] for d in batch["dish_id"]]
+                tgt = torch.from_numpy(aux_mat[rows]).to(device)
+                loss = loss + aux_lambda * torch.mean(torch.abs(aux_pred - tgt))
             else:
                 pred = fusion(rgb, depth)
                 loss, _ = criterion(pred, targets)
@@ -194,6 +238,13 @@ def main():
                              "directement la fusion multi-échelle. Contrairement à "
                              "--no-depth (profondeur permutée), il n'y a plus de profondeur "
                              "du tout. Suffixe checkpoint _rgbsingle.")
+    parser.add_argument("--aux-ingr-mass", action="store_true",
+                        help="tête auxiliaire supervisée sur les masses PAR INGRÉDIENT (test W2). "
+                             "Le carb est aussi reconstruit depuis les masses prédites × densités. "
+                             "Si le carb reste ~20%%, l'image ne récupère pas la composition même "
+                             "supervisée dessus. Directe + sans FLAVA. Suffixe _auxmass.")
+    parser.add_argument("--aux-lambda", type=float, default=1.0,
+                        help="poids de la perte auxiliaire (masses par ingrédient, L1 en g).")
     parser.add_argument("--carb-only", action="store_true",
                         help="ablation mono-tâche : perte L1 sur le SEUL glucide "
                              "(sélection de l'époque sur le PMAE glucide). Teste la "
@@ -215,6 +266,8 @@ def main():
     if args.rgb_only and args.no_depth:
         raise ValueError("--rgb-only (mono-branche) et --no-depth (profondeur permutée) "
                          "sont deux ablations distinctes, à ne pas combiner")
+    if args.aux_ingr_mass and (args.density or need_flava or args.carb_only):
+        raise ValueError("--aux-ingr-mass s'utilise avec la tête directe, sans FLAVA ni --carb-only")
     if not (0.0 < args.train_frac <= 1.0):
         raise ValueError("--train-frac doit être dans ]0, 1]")
 
@@ -270,8 +323,18 @@ def main():
         test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
+    aux_dim = 0
+    aux_mat = aux_dish2row = aux_dens = aux_test_mat = None
+    if args.aux_ingr_mass:  # cibles masses par ingrédient (test W2)
+        vocab_a, mass_matrix, aux_dens = build_ingr_mass_targets(train_ids, METADATA_CAFE1)
+        aux_dim = len(vocab_a)
+        aux_mat = mass_matrix(train_ids)
+        aux_dish2row = {d: i for i, d in enumerate(train_ids)}
+        aux_test_mat = mass_matrix(test_ids)
+        print(f"  tête auxiliaire masses/ingrédient : vocab={aux_dim} | λ_aux={args.aux_lambda}")
+
     fusion = RGBDFusionNet(pretrained=True, proj_dim=FLAVA_PROJ_DIM, density=args.density,
-                           rgb_only=args.rgb_only).to(device)
+                           rgb_only=args.rgb_only, aux_ingr_dim=aux_dim).to(device)
     if args.pretrained:
         if not args.density:
             raise ValueError("--pretrained nécessite --density (mêmes têtes)")
@@ -332,6 +395,8 @@ def main():
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_rgbonly{ckpt_path.suffix}")
     if args.carb_only:
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_carbonly{ckpt_path.suffix}")
+    if args.aux_ingr_mass:
+        ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_auxmass{ckpt_path.suffix}")
     if args.train_frac < 1.0:
         frac_tag = f"{args.train_frac:.2f}".rstrip("0").rstrip(".").replace(".", "p")
         ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_f{frac_tag}{ckpt_path.suffix}")
@@ -350,7 +415,8 @@ def main():
             density=args.density, flava=flava, cache=cache,
             lam_txt=args.align_lambda, lam_vis=args.vis_lambda,
             tau=args.align_temperature, n_neg=args.align_neg,
-            no_depth=args.no_depth,
+            no_depth=args.no_depth, aux=args.aux_ingr_mass, aux_mat=aux_mat,
+            dish2row=aux_dish2row, aux_lambda=args.aux_lambda,
         )
         va_loss, va_metrics = evaluate(fusion, val_loader, total_criterion, device,
                                        density=args.density, no_depth=args.no_depth)
@@ -387,6 +453,25 @@ def main():
         f"| val_sel={best_pmae:.2f}% | test_PMAE={test_metrics['mean_pmae']:.2f}% "
         f"| test_carb_PMAE={test_metrics['carb']['pmae']:.2f}%"
     )
+    if args.aux_ingr_mass:  # test W2 : carb reconstruit depuis les masses PAR INGRÉDIENT prédites
+        fusion.eval()
+        pred_masses, ci = [], []
+        _carb = NUTRIENT_NAMES.index("carb")
+        with torch.no_grad():
+            for batch in test_loader:
+                _, a = fusion(batch["rgb"].to(device), batch["depth"].to(device), return_aux=True)
+                pred_masses.append(a.cpu().numpy())
+                ci.append(batch["targets"][:, _carb].numpy())
+        pred_masses = np.concatenate(pred_masses); true_carb = np.concatenate(ci)
+        carb_from_aux = pred_masses @ aux_dens                      # Σ masse_ingr × densité_carb/g
+        mean_c = true_carb.mean()
+        carb_pmae = np.mean(np.abs(carb_from_aux - true_carb)) / mean_c * 100
+        mass_mae = np.mean(np.abs(pred_masses - aux_test_mat))       # MAE masses/ingrédient (g)
+        print(
+            f"  [aux W2] carb reconstruit depuis masses/ingrédient prédites : "
+            f"test_carb_from_aux_PMAE={carb_pmae:.2f}%  | MAE masses/ingr={mass_mae:.2f} g "
+            f"(P2 oracle=1.3%, tête directe={test_metrics['carb']['pmae']:.2f}%)"
+        )
 
 
 if __name__ == "__main__":

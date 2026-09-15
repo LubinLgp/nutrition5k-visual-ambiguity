@@ -58,10 +58,11 @@ class RGBDFusionNet(nn.Module):
     """
 
     def __init__(self, pretrained: bool = True, proj_dim: int = FLAVA_PROJ_DIM,
-                 density: bool = False, rgb_only: bool = False):
+                 density: bool = False, rgb_only: bool = False, aux_ingr_dim: int = 0):
         super().__init__()
         self.density = density
         self.rgb_only = rgb_only  # mono-branche : aucune profondeur (ni backbone ni CAB)
+        self.aux_ingr_dim = aux_ingr_dim  # tête auxiliaire : masses par ingrédient (test W2)
         self.rgb_backbone = SwinMultiScale(3, pretrained=pretrained)
         ch = self.rgb_backbone.out_channels
         if not rgb_only:
@@ -83,6 +84,8 @@ class RGBDFusionNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(2048, proj_dim),
         )
+        if aux_ingr_dim:  # prédit le vecteur de masses par ingrédient (g), supervisé sur la vérité
+            self.aux_head = nn.Linear(2048, aux_ingr_dim)
 
     def encode_visual(self, rgb: torch.Tensor, depth: torch.Tensor = None) -> torch.Tensor:
         rgb_feats = self.rgb_backbone(rgb)
@@ -95,7 +98,8 @@ class RGBDFusionNet(nn.Module):
         x = self.gap(f4).flatten(1)
         return self.fc(x)
 
-    def forward(self, rgb: torch.Tensor, depth: torch.Tensor = None, return_embedding: bool = False):
+    def forward(self, rgb: torch.Tensor, depth: torch.Tensor = None, return_embedding: bool = False,
+                return_aux: bool = False):
         h = self.encode_visual(rgb, depth)
         feat = torch.relu(h)
         if self.density:
@@ -106,6 +110,9 @@ class RGBDFusionNet(nn.Module):
                 return mass, dens, self.proj_head(h)
             return mass, dens
         pred = torch.cat([self.heads[n](feat) for n in NUTRIENT_NAMES], dim=1)
+        extra = []
         if return_embedding:
-            return pred, self.proj_head(h)
-        return pred
+            extra.append(self.proj_head(h))
+        if return_aux:  # masses par ingrédient prédites (g, positives)
+            extra.append(F.softplus(self.aux_head(feat)))
+        return (pred, *extra) if extra else pred
